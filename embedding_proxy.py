@@ -47,7 +47,7 @@ async def create_embedding(request: EmbeddingRequest):
             object="list",
             data=embeddings,
             model=request.model,
-            
+            usage={"prompt_tokens": 0, "total_tokens": 0}
         )
 
 if __name__ == "__main__":

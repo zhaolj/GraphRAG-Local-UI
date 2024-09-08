@@ -5,6 +5,8 @@
 
 import logging
 from json import JSONDecodeError
+from langfuse.decorators import observe, langfuse_context
+import os
 
 from typing_extensions import Unpack
 
@@ -41,9 +43,11 @@ class OpenAIChatLLM(BaseLLM[CompletionInput, CompletionOutput]):
         self.client = client
         self.configuration = configuration
 
+    @observe()
     async def _execute_llm(
         self, input: CompletionInput, **kwargs: Unpack[LLMInput]
     ) -> CompletionOutput | None:
+        langfuse_context.update_current_observation(session_id=os.environ.get("LANGFUSE_SESSION_ID"))
         args = get_completion_llm_args(
             kwargs.get("model_parameters"), self.configuration
         )
@@ -53,7 +57,9 @@ class OpenAIChatLLM(BaseLLM[CompletionInput, CompletionOutput]):
             {"role": "user", "content": input},
         ]
         completion = await self.client.chat.completions.create(
-            messages=messages, **args
+            messages=messages, **args,
+            name="GraphRAG",
+            session_id=os.environ.get("GRAPHRAG_SESSION_ID")
         )
         return completion.choices[0].message.content
 

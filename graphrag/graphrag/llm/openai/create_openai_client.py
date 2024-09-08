@@ -9,7 +9,7 @@ import re
 from urllib.parse import urljoin
 
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import AsyncOpenAI
+from langfuse.openai import AsyncOpenAI
 
 from .openai_configuration import OpenAIConfiguration
 from .types import OpenAIClientTypes

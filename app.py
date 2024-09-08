@@ -2,6 +2,7 @@ import gradio as gr
 from gradio.helpers import Progress
 import asyncio
 import subprocess
+import langfuse.openai as openai
 import yaml
 import os
 import networkx as nx
@@ -23,8 +24,10 @@ from datetime import datetime
 import json
 import requests
 import aiohttp
-from openai import OpenAI
-from openai import AsyncOpenAI
+from langfuse.openai import OpenAI
+from langfuse.openai import AsyncOpenAI
+from langfuse.decorators import observe, langfuse_context
+import uuid
 import pyarrow.parquet as pq
 import pandas as pd
 import sys
@@ -71,6 +74,18 @@ os.environ.setdefault("LLM_MODEL", os.getenv("LLM_MODEL"))
 os.environ.setdefault("EMBEDDINGS_API_BASE", os.getenv("EMBEDDINGS_API_BASE"))
 os.environ.setdefault("EMBEDDINGS_API_KEY", os.getenv("EMBEDDINGS_API_KEY"))
 os.environ.setdefault("EMBEDDINGS_MODEL", os.getenv("EMBEDDINGS_MODEL"))
+os.environ.setdefault("LANGFUSE_PUBLIC_KEY", os.getenv("LANGFUSE_PUBLIC_KEY"))
+os.environ.setdefault("LANGFUSE_SECRET_KEY", os.getenv("LANGFUSE_SECRET_KEY"))
+os.environ.setdefault("LANGFUSE_HOST", os.getenv("LANGFUSE_HOST"))
+
+base_root_dir = os.getenv("ROOT_DIR", "./indexing")
+
+# langfuse.Langfuse(
+#     public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+#     secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+#     host=os.getenv("LANGFUSE_HOST"),
+# ).auth_check()
+session_id = str(uuid.uuid4())
 
 # Add the project root to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -106,7 +121,7 @@ def initialize_models():
     embeddings_api_key = os.getenv("EMBEDDINGS_API_KEY")
     
     llm_service_type = os.getenv("LLM_SERVICE_TYPE", "openai_chat").lower()  # Provide a default and lower it
-    embeddings_service_type = os.getenv("EMBEDDINGS_SERVICE_TYPE", "openai").lower()  # Provide a default and lower it
+    embeddings_service_type = os.getenv("EMBEDDINGS_SERVICE_TYPE", "openai_embedding").lower()  # Provide a default and lower it
     
     llm_model = os.getenv("LLM_MODEL")
     embeddings_model = os.getenv("EMBEDDINGS_MODEL")
@@ -148,7 +163,7 @@ def initialize_models():
     return llm_models, embeddings_models, llm_service_type, embeddings_service_type, llm_api_base, embeddings_api_base, text_embedder
 
 def find_latest_output_folder():
-    root_dir = "./indexing/output"
+    root_dir = f"{base_root_dir}/output"
     folders = [f for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))]
     
     if not folders:
@@ -251,7 +266,7 @@ def wait_for_api_server(port):
 
 def load_settings():
     try:
-        with open("indexing/settings.yaml", "r") as f:
+        with open(f"{base_root_dir}/settings.yaml", "r") as f:
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         return {}
@@ -264,7 +279,7 @@ def update_setting(key, value):
         settings[key] = value
     
     try:
-        with open("indexing/settings.yaml", "w") as f:
+        with open(f"{base_root_dir}/settings.yaml", "w") as f:
             yaml.dump(settings, f, default_flow_style=False)
         return f"Setting '{key}' updated successfully"
     except Exception as e:
@@ -300,19 +315,22 @@ def get_openai_client():
         api_key=os.getenv("LLM_API_KEY"),
         llm_model = os.getenv("LLM_MODEL")
     )
-
+@observe()
 async def chat_with_openai(messages, model, temperature, max_tokens, api_base):
     client = AsyncOpenAI(
         base_url=api_base,
         api_key=os.getenv("LLM_API_KEY")
     )
 
+    langfuse_context.update_current_trace(session_id=session_id)
     try:
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            name="GraphRAG_UI_App",
+            session_id=session_id
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -320,7 +338,9 @@ async def chat_with_openai(messages, model, temperature, max_tokens, api_base):
         return f"An error occurred: {str(e)}"
         return f"Error: {str(e)}"
 
+@observe()
 def chat_with_llm(query, history, system_message, temperature, max_tokens, model, api_base):
+    langfuse_context.update_current_trace(session_id=session_id)
     try:
         messages = [{"role": "system", "content": system_message}]
         for item in history:
@@ -336,7 +356,9 @@ def chat_with_llm(query, history, system_message, temperature, max_tokens, model
             model=model,
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            name = "GraphRAG_UI_App",
+            session_id=session_id
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -422,7 +444,7 @@ def construct_cli_args(query_type, preset, community_level, response_type, custo
     if not selected_folder:
         raise ValueError("No folder selected. Please select an output folder before querying.")
 
-    artifacts_folder = os.path.join("./indexing/output", selected_folder, "artifacts")
+    artifacts_folder = os.path.join(f"{base_root_dir}/output", selected_folder, "artifacts")
     if not os.path.exists(artifacts_folder):
         raise ValueError(f"Artifacts folder not found in {artifacts_folder}")
 
@@ -430,6 +452,7 @@ def construct_cli_args(query_type, preset, community_level, response_type, custo
         "python", "-m", "graphrag.query",
         "--data", artifacts_folder,
         "--method", query_type,
+        "--root", base_root_dir
     ]
 
     # Apply preset configurations
@@ -490,7 +513,7 @@ def upload_file(file):
     return status, gr.update(choices=updated_file_list), update_logs()
 
 def list_input_files():
-    input_dir = os.path.join("indexing", "input")
+    input_dir = os.path.join(base_root_dir, "input")
     files = []
     if os.path.exists(input_dir):
         files = os.listdir(input_dir)
@@ -775,7 +798,7 @@ def update_llm_settings(llm_model, embeddings_model, context_window, system_mess
         # Update settings.yaml
         settings = load_settings()
         settings['llm'].update({
-            "type": "openai",  # Always set to "openai" since we removed the radio button
+            "type": "openai_chat",  # Always set to "openai" since we removed the radio button
             "model": llm_model,
             "api_base": llm_api_base,
             "api_key": "${GRAPHRAG_API_KEY}",
@@ -791,7 +814,7 @@ def update_llm_settings(llm_model, embeddings_model, context_window, system_mess
             "provider": embeddings_service_type
         })
         
-        with open("indexing/settings.yaml", 'w') as f:
+        with open(f"{base_root_dir}/settings.yaml", 'w') as f:
             yaml.dump(settings, f, default_flow_style=False)
         
         # Update .env file
@@ -1118,19 +1141,19 @@ def list_folder_contents(folder_path):
     return contents
 
 def update_output_folder_list():
-    root_dir = "./"
+    root_dir = base_root_dir
     folders = list_output_folders(root_dir)
     return gr.update(choices=folders, value=folders[0] if folders else None)
 
 def update_folder_content_list(folder_name):
-    root_dir = "./"
+    root_dir = base_root_dir
     if not folder_name:
         return gr.update(choices=[])
     contents = list_folder_contents(os.path.join(root_dir, "output", folder_name, "artifacts"))
     return gr.update(choices=contents)
 
 def handle_content_selection(folder_name, selected_item):
-    root_dir = "./"
+    root_dir = base_root_dir
     if isinstance(selected_item, list) and selected_item:
         selected_item = selected_item[0]  # Take the first item if it's a list
     
@@ -1150,7 +1173,7 @@ def handle_content_selection(folder_name, selected_item):
         return gr.update(), "", ""
 
 def initialize_selected_folder(folder_name):
-    root_dir = "./"
+    root_dir = base_root_dir
     if not folder_name:
         return "Please select a folder first.", gr.update(choices=[])
     folder_path = os.path.join(root_dir, "output", folder_name, "artifacts")
@@ -1197,7 +1220,7 @@ def refresh_indexing():
 
 
 def run_indexing(root_dir, config_file, verbose, nocache, resume, reporter, emit_formats, custom_args):
-    cmd = ["python", "-m", "graphrag.index", "--root", "./indexing"]
+    cmd = ["python", "-m", "graphrag.index", "--root", base_root_dir]
     
     # Add custom CLI arguments
     if custom_args:
@@ -1312,7 +1335,7 @@ def create_gradio_interface():
                         
 
                     with gr.TabItem("Indexing"):
-                        root_dir = gr.Textbox(label="Root Directory", value="./")
+                        root_dir = gr.Textbox(label="Root Directory", value=base_root_dir)
                         config_file = gr.File(label="Config File (optional)")
                         with gr.Row():
                             verbose = gr.Checkbox(label="Verbose", value=True)

@@ -86,6 +86,8 @@ def load_settings():
         'api_base': os.getenv('LLM_API_BASE', config.get('api_base')),
         'embeddings_api_base': os.getenv('EMBEDDINGS_API_BASE', config.get('embeddings_api_base')),
         'api_type': os.getenv('API_TYPE', config.get('api_type', 'openai')),
+        'llm_api_key': os.getenv('LLM_API_KEY', config.get('llm_api_key')),
+        'embeddings_api_key': os.getenv('EMBEDDINGS_API_KEY', config.get('embeddings_api_key')),
     }
 
     return settings
@@ -394,10 +396,15 @@ def get_ollama_models(base_url: str) -> List[str]:
         logger.error(f"Error fetching Ollama models: {str(e)}")
         return []
 
-def get_openai_compatible_models(base_url: str) -> List[str]:
+def get_openai_compatible_models(base_url: str, api_key: str=None) -> List[str]:
     """Fetch available models from OpenAI-compatible API."""
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
     try:
-        response = requests.get(f"{normalize_api_base(base_url)}/v1/models")
+        response = requests.get(f"{normalize_api_base(base_url)}/v1/models", headers=headers)
         response.raise_for_status()
         models = response.json().get('data', [])
         return [model['id'] for model in models]
@@ -405,12 +412,12 @@ def get_openai_compatible_models(base_url: str) -> List[str]:
         logger.error(f"Error fetching OpenAI-compatible models: {str(e)}")
         return []
 
-def get_local_models(base_url: str) -> List[str]:
+def get_local_models(base_url: str, api_key=None) -> List[str]:
     """Get available models based on the API type."""
     if is_ollama_api(base_url):
         return get_ollama_models(base_url)
     else:
-        return get_openai_compatible_models(base_url)
+        return get_openai_compatible_models(base_url, api_key)
 
 def get_model_params(base_url: str, model_name: str) -> dict:
     """Get model parameters for Ollama models."""
@@ -741,6 +748,8 @@ def create_interface():
     settings = load_settings()
     llm_api_base = normalize_api_base(settings['api_base'])
     embeddings_api_base = normalize_api_base(settings['embeddings_api_base'])
+    llm_api_key = settings['api_key']
+    embeddings_api_key = settings['embeddings_api_key']
 
     with gr.Blocks(theme=gr.themes.Base(), css=css) as demo:
         gr.Markdown("# GraphRAG Indexer")
@@ -856,11 +865,11 @@ def create_interface():
 
         # Event handlers
         def refresh_llm_models():
-            models = get_local_models(llm_api_base)
+            models = get_local_models(llm_api_base, llm_api_key)
             return gr.update(choices=models)
 
         def refresh_embed_models():
-            models = get_local_models(embeddings_api_base)
+            models = get_local_models(embeddings_api_base, embeddings_api_key)
             return gr.update(choices=models)
 
         refresh_llm_btn.click(
